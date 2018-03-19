@@ -2,6 +2,7 @@
 
 library(httr)
 library(readr)
+library(tidyr)
 library(dplyr)
 
 # Data exports from FJC (https://www.fjc.gov/history/judges/biographical-directory-article-iii-federal-judges-export):
@@ -12,17 +13,62 @@ library(dplyr)
 judgesConn <- GET(url = "https://www.fjc.gov/sites/default/files/history/judges.csv")
 judgesOrig <- content(judgesConn, type = "text/csv")
 
+# needed to make column numeric
+judgesOrig$`Degree Year (1)` <- gsub("ca. ", "", judgesOrig$`Degree Year (1)`)
+judgesOrig$`Degree Year (2)` <- gsub("1949-1951", "1950", judgesOrig$`Degree Year (2)`)
 
-# Durations
+# Switch additional appointments to longform 
+judges <- NULL
+for (i in 1:3) { # todo: 4 has some, 5,6 have 1
+  thisJudge <- judgesOrig %>%
+    select(nid, contains(paste0("(",i,")")))
+  
+  newNames <- substr(names(thisJudge), 1, nchar(names(thisJudge)) - 4)
+  newNames[1] <- "nid"
+  names(thisJudge) <- make.names(newNames)
+  
+  # class alignments
+  thisJudge$Degree.Year <- as.numeric(thisJudge$Degree.Year)
+  
+  # Remove judges without this iteration of a judgship
+  thisJudge <- filter(thisJudge, !is.na(Court.Name))
+  
+  judges <- bind_rows(judges, thisJudge)
+}
+
+# Add back the other data
+otherData <- judgesOrig %>%
+  select(nid:`Race or Ethnicity`, `Professional Career`, `Other Nominations/Recess Appointments`)
 judges <- judges %>%
-  mutate(durationNomToReferral = `Committee Referral Date (1)` - `Nomination Date (1)`,
-         durationReferralToHearing = `Hearing Date (1)` - `Committee Referral Date (1)`,
-         durationHearingToCmteAction = ,
-         durationCmteActionToSenateVote = )
+  left_join(otherData, by = "nid")
+
+# Calculate some durations
+judges <- judges %>%
+  mutate(durationNomToReferral = as.double(Committee.Referral.Date - Nomination.Date),
+         durationReferralToHearing = as.double(Hearing.Date - Committee.Referral.Date),
+         durationHearingToCmteAction = as.double(Committee.Action.Date - Hearing.Date),
+         durationCmteActionToSenateVote = as.double(Confirmation.Date - Committee.Action.Date),
+         durationTotal = as.double(Confirmation.Date - Nomination.Date))
+
+# After Carter
+modernJudges <- judges %>%
+  filter(Nomination.Date > as.Date("1976-01-20"))
+
+judgesByPrez <- judges %>%
+  filter(!is.na(Appointing.President),
+         !(Appointing.President == "None (assignment)" |
+             Appointing.President == "None (reassignment)")) %>%
+  group_by(Appointing.President) %>%
+  summarise(mean = mean(durationTotal, na.rm = T),
+            median = median(durationTotal, na.rm = T))
+
+judgesByCourt <- judges %>%
+  group_by(Court.Type) %>%
+  summarise(mean = mean(durationTotal, na.rm = T),
+            median = median(durationTotal, na.rm = T))
 
 
 # Ideas: durations
-# to longform (just gather by (x))
 # ABA ratings
 # everything by prez
 # join by senator & party
