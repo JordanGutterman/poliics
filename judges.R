@@ -4,6 +4,7 @@ library(httr)
 library(readr)
 library(tidyr)
 library(dplyr)
+library(ggplot2)
 
 # Data exports from FJC (https://www.fjc.gov/history/judges/biographical-directory-article-iii-federal-judges-export):
 # 1. By-judge file: https://www.fjc.gov/sites/default/files/history/judges.csv
@@ -67,8 +68,24 @@ judgesByCourt <- judges %>%
   summarise(mean = mean(durationTotal, na.rm = T),
             median = median(durationTotal, na.rm = T))
 
+# Graphs
+plot(judges$Nomination.Date, judges$durationTotal)
+plot(modernJudges$Nomination.Date, modernJudges$durationTotal)
+judgesByPrez$mean <- as.double(judgesByPrez$mean)
+plot(judgesByPrez$Appointing.President, judgesByPrez$mean)
+ggplot(judgesByPrez, aes(x=Appointing.President, y=mean))
+
+prezChanges <- as.Date(c("1981-01-20","1989-01-20","1993-01-20","2001-01-20","2009-01-20","2017-01-20"))
+
+ggplot(data = modernJudges, aes(x=Nomination.Date, y=durationTotal)) +
+  geom_point() +
+  geom_vline(xintercept = prezChanges) +
+  geom_smooth()
+
 
 # Ideas: durations
 # ABA ratings
 # everything by prez
 # join by senator & party
+# table with gridextra
+
