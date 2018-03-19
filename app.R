@@ -9,10 +9,16 @@ ui <- fluidPage(
                   label = "Duration:",
                   choices = c("durationNomToReferral", "durationReferralToHearing","durationHearingToCmteAction",
                               "durationCmteActionToSenateVote","durationTotal"),
-                  selected = "durationTotal")
+                  selected = "durationTotal"),
+      selectInput(inputId = "tableby",
+                  label = "Table by:",
+                  choices = c("judgesByPrez", "judgesByCourt"),
+                  selected = "judgesByPrez")
     ),
     mainPanel(
-      plotOutput(outputId = "plot")
+      plotOutput(outputId = "plot"),
+      #dataTableOutput(outputId = "table")
+      tableOutput(outputId = "table")
     )
   )
 )
@@ -23,6 +29,8 @@ server <- function(input, output) {
       geom_point() +
       geom_vline(xintercept = prezChanges)
   })
+  #output$table <- renderDataTable(ifelse(input$tableby == "judgesByPrez", judgesByPrez, judgesByCourt))
+  output$table <- renderTable(ifelse(input$tableby == "judgesByPrez", judgesByPrez, judgesByCourt))
 }
 
 shinyApp(ui = ui, server = server)
