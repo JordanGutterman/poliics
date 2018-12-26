@@ -1,6 +1,7 @@
 # judges with a db
 library(DBI)
 library(RPostgreSQL)
+library(dplyr)
 library(dbplyr)
 
 dbSafeNames = function(names) {
@@ -18,3 +19,9 @@ db <- dbConnect(RPostgreSQL::PostgreSQL(), dbname = "judges", user = "postgres",
 dbWriteTable(db, 'judge', judgesOrig)
 
 sel <- dbGetQuery(db, "SELECT nid, jid FROM judge")
+
+judges2 <- tbl(db, "judge") %>%
+  filter(nomination_date > as.Date("1976-01-20"))
+dim(judges2)
+
+

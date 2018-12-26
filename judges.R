@@ -11,8 +11,9 @@ library(ggplot2)
 # 2. by-category files: Demographics, Federal Judicial Service, Other Federal Judicial Service, Education, 
 #    Professional Career, Other Nominations/Recess Appointments
 
-judgesConn <- GET(url = "https://www.fjc.gov/sites/default/files/history/judges.csv")
-judgesOrig <- content(judgesConn, type = "text/csv")
+#judgesConn <- GET(url = "https://www.fjc.gov/sites/default/files/history/judges.csv")
+#judgesOrig <- content(judgesConn, type = "text/csv")
+judgesOrig <- read.csv("https://www.fjc.gov/sites/default/files/history/judges.csv")
 
 # needed to make column numeric
 judgesOrig$`Degree Year (1)` <- gsub("ca. ", "", judgesOrig$`Degree Year (1)`)
