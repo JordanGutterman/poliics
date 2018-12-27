@@ -53,6 +53,24 @@ judges <- judges %>%
          durationCmteActionToSenateVote = as.double(Confirmation.Date - Committee.Action.Date),
          durationTotal = as.double(Confirmation.Date - Nomination.Date))
 
+# Add a numeric variable for President's Party (0=D, 1=R)
+judges <- judges %>%
+  mutate(Pres.Party = as.factor(case_when(Party.of.Appointing.President == "Democratic" ~ "D",
+                                          Party.of.Appointing.President == "Republican" ~ "R")))
+
+# Add the party control of the senate on the date of confirmation
+# Issue: doesn't take into account the nomination date
+senate_control <- read.csv("senate_control.csv") %>%
+  mutate(Senate.Control = as.factor(ifelse(Rep > Dem, "R", "D")))
+
+judges <- judges %>%
+  mutate(Conf.Year = as.numeric(format(Confirmation.Date,'%Y'))) %>%
+  left_join(senate_control, by = c("Conf.Year" = "Year"))
+
+# Party control of senate = pres
+judges <- judges %>%
+  mutate(Party.Full.Control = Pres.Party == Senate.Control)
+
 # After Carter
 modernJudges <- judges %>%
   filter(Nomination.Date > as.Date("1976-01-20"))
