@@ -1,0 +1,149 @@
+---
+title: "GA off-year model"
+output: html_notebook
+---
+
+Predictive models for Nov 2, 2021 VA off-year general election.
+
+```{r data}
+
+library(tidyr)
+library(dplyr)
+library(httr)
+library(jsonlite)
+
+# Reads in json url, returns the data frame
+nyt_data <- function(url) {
+  response <- GET(url)
+  text_json <- content(response, type = 'text', encoding = "UTF-8")
+  
+  fromJSON(text_json)
+}
+
+### County-level data from the NYT
+
+# 2020 election for the prior covariates
+natl <- nyt_data("https://static01.nyt.com/elections-assets/2020/data/api/2020-11-03/national-map-page/national/president.json")
+va20 <- natl$data$races$counties[[46]] # VA 2020
+names(va20) <- paste0(names(va20), "_20")
+
+
+# This election's live results
+va <- nyt_data("https://static01.nyt.com/elections-assets/2020/data/api/2021-11-02/state-page/virginia.json")
+
+# This is a list of data frames for all county-level results. Each race is an element in the list
+cty_raw <- va$data$races$counties
+
+# Grab the race we want
+gov <- cty_raw[[1]]
+names(gov) <- paste0(names(gov), "_21")
+
+# Combine to create our main county frame
+cty <- full_join(va20, gov, by = c("fips_20" = "fips_21"))
+
+# Flatten the results list-column manually since it's simple
+cty$votes_trump <- cty$results_20$trumpd
+cty$votes_biden <- cty$results_20$bidenj
+cty$votes_abs_trump <- cty$results_absentee_20$trumpd
+cty$votes_abs_biden <- cty$results_absentee_20$bidenj
+
+cty$votes_mack21 <- cty$results_21$mcauliffet
+cty$votes_young21 <- cty$results_21$youngking
+cty$votes_abs_mack21 <- cty$results_absentee_21$mcauliffet
+cty$votes_abs_young21 <- cty$results_absentee_21$youngking
+
+# Clean up a bit
+cty2 <- cty %>%
+  # remove junk cols
+  select(name_20, votes_20, votes20_abs = absentee_votes_20,
+         votes_21, votes21_abs = absentee_votes_21,
+         votes_trump, votes_biden, votes_abs_biden, votes_abs_trump,
+         votes_mack21, votes_young21,
+         votes_abs_mack21, votes_abs_young21) %>%
+  # lowercase county names
+  mutate(County = tolower(name_20),
+         # eday only vote
+         votes_eday_biden = votes_biden - votes_abs_biden,
+         votes_eday_trump = votes_trump - votes_abs_trump,
+         votes_eday_mack21 = votes_mack21 - votes_abs_mack21,
+         votes_eday_young21 = votes_young21 - votes_abs_young21,
+         votes20_eday = votes_20 - votes20_abs, votes21_eday = votes_21 - votes21_abs, 
+         # share of 2-party vote
+         perc_biden = votes_biden / (votes_biden + votes_trump),
+         perc_abs_biden = votes_abs_biden / (votes_abs_biden + votes_abs_trump),
+         perc_eday_biden = votes_eday_biden / (votes_eday_biden + votes_eday_trump),
+         perc_abs_mack = votes_abs_mack21 / (votes_abs_mack21 + votes_abs_young21),
+         perc_eday_mack = votes_eday_mack21 / (votes_eday_mack21 + votes_eday_young21))
+
+# Longform by vote type the messy way
+cty_abs <- cty2 %>%
+  select(locality_name = County, votes20 = votes20_abs, votes21 = votes21_abs,
+         votes_biden = votes_abs_biden, votes_trump = votes_abs_trump,
+         votes_mack = votes_abs_mack21, votes_young = votes_abs_young21,
+         perc_biden = perc_abs_biden, perc_mack = perc_abs_mack) %>%
+  mutate(vote_type = "Abs", trn_chg = .44)
+cty_eday <- cty2 %>%
+  select(locality_name = County, votes20 = votes20_eday, votes21 = votes21_eday,
+         votes_biden = votes_eday_biden, votes_trump = votes_eday_trump,
+         votes_mack = votes_eday_mack21, votes_young = votes_eday_young21,
+         perc_biden = perc_eday_biden, perc_mack = perc_eday_mack) %>%
+  mutate(vote_type = "Eday", trn_chg = 1.3)
+cty3 <- bind_rows(cty_abs, cty_eday)
+
+# Turnout predictions
+# super naive for now: apply uniform turnout change no matter vote method
+t_change <- 3300000 / sum(cty3$votes20)
+predicted %>% mutate(trn = votes21/votes20) %>% filter(trn>0) %>% group_by(vote_type) %>% summarise(t=mean(trn))
+# .42 / 1.3
+
+cty3 <- cty3 %>%
+  mutate(expected_votes = votes20 * trn_chg)
+
+```
+
+
+```{r model}
+
+# Training set excludes counties w/o any votes
+train_cty <- cty3 %>%
+  filter(votes21 > 0)
+
+# using share instead of raw votes
+mod_cty <- lm(perc_mack ~ perc_biden +
+                vote_type + # type dummy
+                votes20 + # '20 turnout (county size proxy)
+                perc_biden:vote_type,
+              train_cty)
+summary(mod_cty)
+
+# Then apply model to the remaining votes
+predicted <- cty3 %>%
+  mutate(pred = predict(mod_cty, cty3)) %>%
+  # And calculate what the predictions mean
+  mutate(young_share_pred = 1 - pred,
+         mack_pred_votes_naive = pred * expected_votes,
+         young_pred_votes_naive = young_share_pred * expected_votes) %>%
+  # and using the counted votes, only predicting what's not counted
+  mutate(mack_votes_pred = votes_mack + (pred * (expected_votes - votes21)),
+         young_votes_pred = votes_young + (pred * (expected_votes - votes21))) %>%
+  mutate(vote_chk = expected_votes - votes21) %>% # votes vs expectation check
+  # remove norton abs, which is empty
+  filter(!is.na(pred))
+
+cat("\n\n")
+
+sum(predicted$mack_pred_votes_naive)
+sum(predicted$young_pred_votes_naive)
+
+# Margin (+ is D lead, - is R lead)
+(sum(predicted$mack_pred_votes_naive) - sum(predicted$young_pred_votes_naive)) / sum(predicted$expected_votes)
+
+cat("\n\n")
+
+sum(predicted$mack_votes_pred)
+sum(predicted$young_votes_pred)
+# Margin (+ is D lead, - is R lead)
+(sum(predicted$mack_votes_pred) - sum(predicted$young_votes_pred)) / sum(predicted$expected_votes)
+
+```
+

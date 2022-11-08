@@ -1,0 +1,342 @@
+---
+title: "GA runoff models"
+output: html_notebook
+---
+
+Predictive models for Jan 5, 2021 GA runoff elections.
+
+```{r data}
+
+library(tidyr)
+library(dplyr)
+library(httr)
+library(jsonlite)
+
+
+# Two possible methods for pulling result data. From GA SoS site, or NYT.
+
+sos_data <- function() {
+  library(readxl)
+  #zip <- GET("https://results.enr.clarityelections.com//GA//105369/271927/reports/detailxls.zip")
+  t <- tempfile()
+  d <- paste0(t,".zip")
+  z <- paste0(t)
+  download.file("https://results.enr.clarityelections.com//GA//105369/271927/reports/detailxls.zip", d)
+  
+  unzip(zipfile=d, exdir=z)
+  
+  f <- paste0(z,"/detail.xls")
+  
+  data <- read_excel(f)
+}
+
+# Reads in json url, returns the data frame
+nyt_data <- function(url) {
+  response <- GET(url)
+  text_json <- content(response, type = 'text', encoding = "UTF-8")
+  
+  fromJSON(text_json)
+}
+
+### County-level data for GA from the NYT
+
+natl <- nyt_data("https://static01.nyt.com/elections-assets/2020/data/api/2020-11-03/national-map-page/national/president.json")
+
+counties <- natl$data$races$counties
+
+ga <- nyt_data("https://static01.nyt.com/elections-assets/2020/data/api/2020-11-03/state-page/georgia.json")
+
+# This is a list of data frames for all county-level results. Each race is an element in the list
+cty_raw <- ga$data$races$counties
+
+# Grab two races we want for covariates
+pres <- cty_raw[[1]]
+sen <- cty_raw[[2]] # Purdue race
+
+names(pres) <- paste0(names(pres), "_pres")
+names(sen) <- paste0(names(sen), "_sen")
+
+# Combine to create our main county frame
+cty <- full_join(pres, sen, by = c("fips_pres" = "fips_sen"))
+
+# Flatten the results list-column manually since it's simple
+cty$votes_trump <- cty$results_pres$trumpd
+cty$votes_biden <- cty$results_pres$bidenj
+cty$votes_abs_trump <- cty$results_absentee_pres$trumpd
+cty$votes_abs_biden <- cty$results_absentee_pres$bidenj
+
+cty$votes_purdue20 <- cty$results_sen$perdued
+cty$votes_ossoff20 <- cty$results_sen$ossoffj
+cty$votes_abs_purdue20 <- cty$results_absentee_sen$perdued
+cty$votes_abs_ossoff20 <- cty$results_absentee_sen$ossoffj
+
+# Clean up a bit
+cty <- cty %>%
+  # remove junk cols
+  select(name_pres, votes20 = votes_pres, votes20_abs = absentee_votes_pres,
+         #votes_trump, votes_biden,
+         votes_purdue20, votes_ossoff20,
+         votes_abs_purdue20, votes_abs_ossoff20) %>%
+  # lowercase county names
+  mutate(County = tolower(name_pres),
+         # eday only vote
+         votes_eday_purdue20 = votes_purdue20 - votes_abs_purdue20,
+         votes_eday_ossoff20 = votes_ossoff20 - votes_abs_ossoff20,
+         votes20_eday = votes20 - votes20_abs,
+         # share of 2-party vote
+         perc_ossoff20 = votes_ossoff20 / (votes_ossoff20 + votes_purdue20),
+         perc_abs_ossoff20 = votes_abs_ossoff20 / (votes_abs_ossoff20 + votes_abs_purdue20),
+         perc_eday_ossoff20 = votes_eday_ossoff20 / (votes_eday_ossoff20 + votes_eday_purdue20))
+
+# Longform by vote type the messy way
+cty_abs <- cty %>%
+  select(locality_name = County, votes20 = votes20_abs,
+         votes_purdue20 = votes_abs_purdue20, votes_ossoff20 = votes_abs_ossoff20,
+         perc_ossoff20 = perc_abs_ossoff20) %>%
+  mutate(vote_type = "Abs")
+cty_eday <- cty %>%
+  select(locality_name = County, votes20 = votes20_eday,
+         votes_purdue20 = votes_eday_purdue20, votes_ossoff20 = votes_eday_ossoff20,
+         perc_ossoff20 = perc_eday_ossoff20) %>%
+  mutate(vote_type = "Eday")
+cty_20 <- bind_rows(cty_abs, cty_eday)
+
+```
+
+
+```{r precinct_data}
+### Precinct-level data for GA from the NYT
+ga_pct <- nyt_data("https://static01.nyt.com/elections-assets/2020/data/api/2020-11-03/precincts/GAGeneral-latest.json")
+
+live_pct <- nyt_data("https://static01.nyt.com/elections-assets/2020/data/api/2021-01-05/precincts/GASenateRunoff-latest.json")
+
+precincts_raw <- ga_pct$precincts
+precincts_live <- live_pct$precincts
+
+# Flatten the results list-column manually since it's simple
+precincts_raw$votes_trump <- precincts_raw$results$trumpd
+precincts_raw$votes_biden <- precincts_raw$results$bidenj
+
+precincts_live$votes_purdue <- precincts_live$results$perdued
+precincts_livevotes_ossoff <- precincts_live$results$ossoffj
+
+# Types of vote available. These show up in colnames after pivot
+table(precincts_raw$vote_type, useNA = 'ifany')
+table(precincts_live$vote_type, useNA = 'ifany')
+
+# Remove provisionals
+# precincts_raw <- precincts_raw %>%
+#   filter(vote_type != "provisional")
+
+# Select down to columns we need, and transform to precinct per row
+precincts <- precincts_raw %>%
+  select(precinct_id, locality_name, vote_type, votes, votes_trump, votes_biden) %>%
+  # Create unique precinct name
+  #mutate(prec = paste(precinct_id, locality_name, sep="_")) %>%
+  pivot_wider(names_from = vote_type,
+              values_from = c(votes, votes_trump, votes_biden))
+
+precincts_l <- precincts_live %>%
+  select(precinct_id, locality_name, vote_type, votes, votes_purdue, votes_ossoff) %>%
+  # Create unique precinct name
+  #mutate(prec = paste(precinct_id, locality_name, sep="_")) %>%
+  pivot_wider(names_from = vote_type,
+              values_from = c(votes, votes_purdue, votes_ossoff))
+
+
+```
+
+
+```{r demog}
+# Demographic data for covariates
+race <- read_excel("County Population by Race 2016.xlsx")
+
+race <- race %>%
+  mutate(locality_name = tolower(gsub(" County, Georgia", "", County)),
+         perc_blk = `Black or African American` / Population) %>%
+  select(locality_name, perc_blk)
+
+```
+
+```{r absentee_early}
+# Read in full voter file (from https://sos.ga.gov/page/voter-absentee-files)
+abs_file <- read.csv("STATEWIDE.csv")
+
+table(abs_file$Ballot.Style, useNA = 'ifany')
+
+# Create precinct level frame from voter-level file
+abs_pct <- abs_file %>%
+  filter(Ballot.Status == "A") %>%
+  # Collapse electronic style and convert type to nyt-style
+  mutate(vote_type = case_when(Ballot.Style == "MAILED" ~ "absentee",
+                               Ballot.Style %in% c("IN PERSON", "ELECTRONIC") ~ "early",
+                               TRUE ~ "early")) %>%
+  group_by(County, County.Precinct, vote_type) %>%
+  summarise(votes_expected = n()) %>% ungroup() %>%
+  # Lowercase county labels
+  mutate(locality_name = tolower(County), County.Precinct = tolower(County.Precinct))
+
+# And a county-level version
+abs_early_cty <- abs_file %>%
+  filter(Ballot.Status == "A") %>%
+  # Collapse electronic style and convert type to nyt-style
+  mutate(vote_type = case_when(Ballot.Style == "MAILED" ~ "absentee",
+                               Ballot.Style %in% c("IN PERSON", "ELECTRONIC") ~ "early",
+                               TRUE ~ "early")) %>%
+  group_by(County, vote_type) %>%
+  summarise(votes_expected = n()) %>% ungroup() %>%
+  # Lowercase county labels
+  mutate(locality_name = tolower(County)) %>% select(-County)
+
+# Finally, a county-level version w/o early/abs split (since nyt doesn't split them)
+abs_cty <- abs_file %>%
+  filter(Ballot.Status == "A") %>%
+  group_by(County) %>%
+  summarise(abs_votes = n()) %>% ungroup() %>%
+  # Lowercase county labels
+  mutate(locality_name = tolower(County), vote_type = "Abs") %>% select(-County)
+
+rm(abs_file) # clean up memory
+
+```
+
+```{r turnout}
+
+# We will start with a rough estimate of 4.2m turnout. This is rough!
+t_ratio <- 4200000 / sum(precincts_raw$votes)
+t_ratio
+
+# Add projected turnout to precinct frame
+precincts_raw2 <- precincts_raw %>%
+  mutate(locality_name = tolower(locality_name)) %>%
+  left_join(abs_rec, by = c("")) # :(
+
+# And county frame
+cty2 <- cty %>%
+  mutate(locality_name = tolower(name_pres)) %>% select(-name_pres) %>%
+  left_join(abs_cty, by = "locality_name")
+
+```
+
+```{r model_precinct}
+
+# Precinct level model
+mod_pct <- lm(votes_ossoff ~ votes_purdue + votes_biden + votes_trump +
+            vote_type + locality_name, # type and county dummies
+          precincts_raw)
+summary(mod_pct)
+
+```
+
+
+```{r live_data}
+# E-night county data
+live_cty <- nyt_data("https://static01.nyt.com/elections-assets/2020/data/api/2021-01-05/state-page/georgia.json")
+
+# This is a list of data frames for all county-level results. Each race is an element in the list
+live_cty2 <- live_cty$data$races$counties
+
+# Pick 2 for P/O race
+live_cty2 <- live_cty2[[2]]
+
+# Flatten the results list-column manually since it's simple
+live_cty2$votes_purdue <- live_cty2$results$perdued
+live_cty2$votes_ossoff <- live_cty2$results$ossoffj
+live_cty2$votesAbs_purdue <- live_cty2$results_absentee$perdued
+live_cty2$votesAbs_ossoff <- live_cty2$results_absentee$ossoffj
+
+# Clean up a bit, get ready for type split
+live_cty3 <- live_cty2 %>%
+  mutate(votesEday_purdue = votes_purdue - votesAbs_purdue,
+         votesEday_ossoff = votes_ossoff - votesAbs_ossoff,
+         votesEday = votes - absentee_votes) %>%
+  mutate(locality_name = tolower(name))
+
+# predicted votes frame, from absentee (county) and all (nyt)
+pred_turnout <- live_cty3 %>%
+  select(locality_name, tot_exp_vote) %>%
+  left_join(abs_cty, by = "locality_name") %>% select(-vote_type) %>%
+  mutate(Eday_votes = tot_exp_vote - abs_votes) %>%
+  pivot_longer(c(abs_votes, Eday_votes), values_to = "expected_votes", names_to = "vote_type") %>%
+  mutate(vote_type = case_when(vote_type == "abs_votes" ~ "Abs", vote_type == "Eday_votes" ~ "Eday"))
+
+# Longform by vote method
+live_cty4 <- live_cty3 %>%
+  select(locality_name,
+         votesEday_purdue, votesEday_ossoff, votesAbs_purdue, votesAbs_ossoff,
+         votesEday, votesAbs = absentee_votes) %>%
+  pivot_longer(-locality_name, names_to = "vote_type")
+live_abs <- live_cty4 %>%
+  filter(grepl("votesAbs", vote_type)) %>%
+  pivot_wider(names_from = vote_type) %>%
+  mutate(vote_type = "Abs") %>%
+  rename(votes_purdue = votesAbs_purdue, votes_ossoff = votesAbs_ossoff, votes = votesAbs)
+live_eday <- live_cty4 %>%
+  filter(grepl("votesEday", vote_type)) %>%
+  pivot_wider(names_from = vote_type) %>%
+  mutate(vote_type = "Eday") %>%
+  rename(votes_purdue = votesEday_purdue, votes_ossoff = votesEday_ossoff, votes = votesEday)
+live <- bind_rows(live_abs, live_eday) %>%
+  # final 2-party share
+  mutate(ossoff_share = votes_ossoff / (votes_purdue + votes_ossoff))
+
+# Add 20 election data to our live dataframe
+live <- live %>%
+  left_join(cty_20, by = c("locality_name", "vote_type")) %>%
+  # And vote prediction estimates
+  left_join(pred_turnout, by = c("locality_name", "vote_type")) %>%
+  # And demographics
+  left_join(race, by = "locality_name")
+
+```
+
+
+```{r model_county}
+
+# Training set excludes counties w/o any votes
+train_cty <- live %>%
+  filter(votes > 0)
+
+# County level model
+# mod_cty <- lm(votes_ossoff ~ votes_purdue + perc_ossoff20 +
+#                 #votes_purdue20 + votes_ossoff20 +
+#                 vote_type + # type dummy
+#                 votes20, # '20 turnout (county size proxy)
+#               train_cty)
+# summary(mod_cty)
+
+# using share instead of raw votes
+mod_cty <- lm(ossoff_share ~ perc_ossoff20 +
+                #votes_purdue20 + votes_ossoff20 +
+                vote_type + # type dummy
+                perc_blk +
+                votes20, # '20 turnout (county size proxy)
+              train_cty)
+summary(mod_cty)
+
+# Then apply model to the remaining votes
+predicted <- live %>%
+  mutate(pred = predict(mod_cty, live)) %>%
+  # And calculate what the predictions mean
+  mutate(purdue_share_pred = 1 - pred,
+         ossoff_pred_votes_naive = pred * expected_votes,
+         purdue_pred_votes_naive = purdue_share_pred * expected_votes) %>%
+  # and using the counted votes, only predicting what's not counted
+  mutate(ossoff_votes_pred = votes_ossoff + (pred * (expected_votes - votes)),
+         purdue_votes_pred = votes_purdue + (pred * (expected_votes - votes)))
+
+cat("\n\n")
+
+sum(predicted$ossoff_pred_votes_naive)
+sum(predicted$purdue_pred_votes_naive)
+
+(sum(predicted$ossoff_pred_votes_naive) - sum(predicted$purdue_pred_votes_naive)) / sum(predicted$expected_votes)
+
+cat("\n\n")
+
+sum(predicted$ossoff_votes_pred)
+sum(predicted$purdue_votes_pred)
+
+(sum(predicted$ossoff_votes_pred) - sum(predicted$purdue_votes_pred)) / sum(predicted$expected_votes)
+
+```
